@@ -18,6 +18,8 @@ let mouseX = 0, mouseY = 0, mouseDown = false;
 let running = false;
 let pendingResize = null;
 
+let resolutionScale = 0.5; // 1 = full res, 0.5 = half res, 0.25 = quarter res
+
 // --- Metaball data ---
 let metaballPosition = [];
 let metaballRadius = [];
@@ -34,8 +36,14 @@ function ensureBuffers(w, h) {
     heightPixels = h;
     horizontalCells = Math.ceil(widthPixels / gridSize);
     verticalCells = Math.ceil(heightPixels / gridSize);
-    imageData = ctx.createImageData(widthPixels, heightPixels);
+    const renderW = Math.floor(widthPixels * resolutionScale);
+    const renderH = Math.floor(heightPixels * resolutionScale);
+
+    imageData = ctx.createImageData(renderW, renderH);
     pixelBuffer = imageData.data;
+
+    horizontalCells = Math.ceil(renderW / gridSize);
+    verticalCells = Math.ceil(renderH / gridSize);
 }
 
 // --- Color helpers ---
@@ -95,16 +103,33 @@ function createDefaults() {
     metaballSelected = [];
     mouseOffset = { x: 0, y: 0 };
 
-    const cx = widthPixels / 2, cy = heightPixels / 2;
-    const radius = 200;
-    const colours = [[0, 100, 100, 1], [120, 100, 100, 1], [240, 100, 100, 1]];
+    const colours = [
+        [0, 100, 100, 1],
+        [120, 100, 100, 1],
+        [240, 100, 100, 1]
+    ];
+
     const n = colours.length;
+    const metaballBaseRadius = 300;
+
+    // Make sure the radius never pushes metaballs off-screen
+    // We'll calculate a "safe" radius based on the smallest screen dimension
+    const maxAllowedRadius = Math.min(widthPixels, heightPixels) / 2 - metaballBaseRadius;
+    const circleRadius = Math.max(0, maxAllowedRadius * 0.8); // padding to keep them comfortably inside
+
+    const cx = widthPixels / 2;
+    const cy = heightPixels / 2;
 
     for (let i = 0; i < n; i++) {
-        const angle = 2 * Math.PI * i / n;
-        const x = cx + radius * Math.cos(angle);
-        const y = cy + radius * Math.sin(angle);
-        createMetaball(x, y, 300, colours[i]);
+        const angle = (2 * Math.PI * i) / n;
+        const x = cx + circleRadius * Math.cos(angle);
+        const y = cy + circleRadius * Math.sin(angle);
+
+        // Clamp to ensure absolute safety
+        const clampedX = Math.min(Math.max(x, metaballBaseRadius), widthPixels - metaballBaseRadius);
+        const clampedY = Math.min(Math.max(y, metaballBaseRadius), heightPixels - metaballBaseRadius);
+
+        createMetaball(clampedX, clampedY, metaballBaseRadius, colours[i]);
     }
 }
 
@@ -136,8 +161,8 @@ function generateFrame() {
             metaballPosition[i][1] *= scaleY;
         }
 
-        widthPixels = newW;
-        heightPixels = newH;
+        widthPixels = Math.ceil(newW);
+        heightPixels = Math.ceil(newH);
         canvas.width = widthPixels;
         canvas.height = heightPixels;
         ensureBuffers(widthPixels, heightPixels);
@@ -174,15 +199,23 @@ function generateFrame() {
     // Clear buffer
     pixelBuffer.fill(0);
 
+    // console.log(widthPixels, heightPixels, horizontalCells, verticalCells)
+
+    const renderW = Math.floor(widthPixels * resolutionScale);
+    const renderH = Math.floor(heightPixels * resolutionScale);
+
     // Render every pixel
-    for (let y = 0; y < heightPixels; y++) {
-        for (let x = 0; x < widthPixels; x++) {
-            const index = (y * widthPixels + x) * 4;
+    for (let y = 0; y < renderH; y++) {
+        for (let x = 0; x < renderW; x++) {
+            const worldX = x / resolutionScale;
+            const worldY = y / resolutionScale;
+            const index = (y * renderW + x) * 4;
+
             let r = 0, g = 0, b = 0, totalWeight = 0, totalForce = 0;
 
             for (let i = 0; i < metaballPosition.length; i++) {
-                const dx = x - metaballPosition[i][0];
-                const dy = y - metaballPosition[i][1];
+                const dx = worldX - metaballPosition[i][0];
+                const dy = worldY - metaballPosition[i][1];
                 const distSq = dx * dx + dy * dy;
                 const force = metaStrength / (distSq + 1);
                 totalForce += force;
@@ -212,6 +245,8 @@ function generateFrame() {
     }
 
     ctx.putImageData(imageData, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(canvas, 0, 0, renderW, renderH, 0, 0, widthPixels, heightPixels);
 }
 
 // --- Loop control ---
@@ -240,8 +275,8 @@ onmessage = function (e) {
     if (data.type === "init") {
         canvas = data.canvas;
         ctx = canvas.getContext("2d");
-        widthPixels = data.width;
-        heightPixels = data.height;
+        widthPixels = Math.ceil(data.width);
+        heightPixels = Math.ceil(data.height);
         gridSize = data.gridSize || 1;
         metaStrength = data.metaStrength || 50000;
 
@@ -263,5 +298,8 @@ onmessage = function (e) {
     } else if (data.type === "addMetaball") {
         const { x, y, r, c } = data;
         createMetaball(x, y, r, c);
+    } else if (data.type === "setResolution") {
+        resolutionScale = data.scale;
+        ensureBuffers(widthPixels, heightPixels);
     }
 };
