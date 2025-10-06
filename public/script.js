@@ -10,7 +10,7 @@ function setCanvasSize() {
 setCanvasSize();
 
 // Create worker and transfer the OffscreenCanvas
-const worker = new Worker("script/worker.js");
+const worker = new Worker("./script/worker.js");
 
 const offscreen = canvas.transferControlToOffscreen();
 worker.postMessage({
@@ -89,3 +89,4 @@ worker.onmessage = (e) => {
         console.log("worker:", e.data.msg);
     }
 };
+
