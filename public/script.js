@@ -75,6 +75,7 @@ window.addEventListener("pointerup", (e) => {
     pendingMouse.changed = true;
     scheduleMouseSend();
 });
+
 window.addEventListener("resize", () => {
     // Just send the new size to the worker
     worker.postMessage({
@@ -91,4 +92,3 @@ worker.onmessage = (e) => {
 };
 
 // worker.postMessage({ type: "setResolution", scale: 0.5 });
-
