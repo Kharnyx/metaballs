@@ -1,7 +1,7 @@
 // script.js
 
 const canvasScaler = 0.75;
-const canvas = document.getElementById("gameCanvas");
+const canvas = document.getElementById("canvas");
 
 function setCanvasSize() {
     canvas.width = Math.floor(window.innerWidth * canvasScaler);
@@ -91,3 +91,4 @@ worker.onmessage = (e) => {
 };
 
 // worker.postMessage({ type: "setResolution", scale: 0.5 });
+
