@@ -89,3 +89,5 @@ worker.onmessage = (e) => {
         console.log("worker:", e.data.msg);
     }
 };
+
+// worker.postMessage({ type: "setResolution", scale: 0.5 });
