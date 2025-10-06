@@ -11,6 +11,8 @@ body {
     width: 100dvw;
     height: 100dvh;
     overflow: hidden;
+    user-select: none;
+    pointer-events: none;
 }
 
 canvas {
