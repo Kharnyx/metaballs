@@ -6,7 +6,8 @@ let ctx = null;
 
 let widthPixels = 0;
 let heightPixels = 0;
-let gridSize = 1;
+let metaballBaseRadius = 300;
+let gridSize = metaballBaseRadius * 2; // Grid cell size set to 2x base radius for safe influence culling
 let horizontalCells = 0;
 let verticalCells = 0;
 let metaStrength = 50000;
@@ -18,14 +19,15 @@ let mouseX = 0, mouseY = 0, mouseDown = false;
 let running = false;
 let pendingResize = null;
 
-let resolutionScale = 0.5; // 1 = full res, 0.5 = half res, 0.25 = quarter res
+let resolutionScale = 1;
 
-// --- Metaball data ---
+// --- Metaball data & Spatial Grid ---
 let metaballPosition = [];
 let metaballRadius = [];
 let metaballColours = [];
 let metaballSelected = [];
 let mouseOffset = { x: 0, y: 0 };
+let metaballGrid = [];
 
 // --- Buffers ---
 let imageData = null;
@@ -34,19 +36,71 @@ let pixelBuffer = null;
 function ensureBuffers(w, h) {
     widthPixels = w;
     heightPixels = h;
-    horizontalCells = Math.ceil(widthPixels / gridSize);
-    verticalCells = Math.ceil(heightPixels / gridSize);
+
     const renderW = Math.floor(widthPixels * resolutionScale);
     const renderH = Math.floor(heightPixels * resolutionScale);
+
+    // Update Grid dimensions based on the rendering size and cell size
+    horizontalCells = Math.ceil(renderW / gridSize);
+    verticalCells = Math.ceil(renderH / gridSize);
 
     imageData = ctx.createImageData(renderW, renderH);
     pixelBuffer = imageData.data;
 
-    horizontalCells = Math.ceil(renderW / gridSize);
-    verticalCells = Math.ceil(renderH / gridSize);
+    // Initialize the Spatial Grid
+    metaballGrid = Array(horizontalCells * verticalCells).fill(0).map(() => []);
 }
 
-// --- Color helpers ---
+// --- Spatial Grid Functions ---
+
+function updateGrid() {
+    // Clear the grid before repopulating
+    for (let i = 0; i < metaballGrid.length; i++) {
+        metaballGrid[i].length = 0;
+    }
+
+    // Populate the grid with metaball indices
+    for (let i = 0; i < metaballPosition.length; i++) {
+        const radius = metaballRadius[i];
+        const x = metaballPosition[i][0];
+        const y = metaballPosition[i][1];
+
+        // Define the influence area for grid cell overlap calculation
+        const influenceMargin = radius * 2;
+        const minCellX = Math.floor((x - influenceMargin) / gridSize);
+        const maxCellX = Math.ceil((x + influenceMargin) / gridSize);
+        const minCellY = Math.floor((y - influenceMargin) / gridSize);
+        const maxCellY = Math.ceil((y + influenceMargin) / gridSize);
+
+        // Map the metaball to all cells it overlaps
+        for (let gx = minCellX; gx < maxCellX; gx++) {
+            for (let gy = minCellY; gy < maxCellY; gy++) {
+                if (gx >= 0 && gx < horizontalCells && gy >= 0 && gy < verticalCells) {
+                    const cellIndex = gy * horizontalCells + gx;
+                    // Add index to the cell list
+                    if (!metaballGrid[cellIndex].includes(i)) {
+                        metaballGrid[cellIndex].push(i);
+                    }
+                }
+            }
+        }
+    }
+}
+
+function getRelevantMetaballs(x, y) {
+    // Get the grid cell index for the given world coordinate (x, y)
+    const gx = Math.floor(x / gridSize);
+    const gy = Math.floor(y / gridSize);
+
+    if (gx < 0 || gx >= horizontalCells || gy < 0 || gy >= verticalCells) {
+        return [];
+    }
+
+    const cellIndex = gy * horizontalCells + gx;
+    return metaballGrid[cellIndex];
+}
+
+// --- Color helpers (unchanged) ---
 function hsvToRgb(h, s, v) {
     let r, g, b;
     const i = Math.floor(h * 6);
@@ -110,22 +164,17 @@ function createDefaults() {
     ];
 
     const n = colours.length;
-    const metaballBaseRadius = 300;
-
-    // Make sure the radius never pushes metaballs off-screen
-    // We'll calculate a "safe" radius based on the smallest screen dimension
-    const maxAllowedRadius = Math.min(widthPixels, heightPixels) / 2 - metaballBaseRadius;
-    const circleRadius = Math.max(0, maxAllowedRadius * 0.8); // padding to keep them comfortably inside
-
     const cx = widthPixels / 2;
     const cy = heightPixels / 2;
+
+    const maxAllowedRadius = Math.min(widthPixels, heightPixels) / 2 - metaballBaseRadius;
+    const circleRadius = Math.max(0, maxAllowedRadius * 0.8);
 
     for (let i = 0; i < n; i++) {
         const angle = (2 * Math.PI * i) / n;
         const x = cx + circleRadius * Math.cos(angle);
         const y = cy + circleRadius * Math.sin(angle);
 
-        // Clamp to ensure absolute safety
         const clampedX = Math.min(Math.max(x, metaballBaseRadius), widthPixels - metaballBaseRadius);
         const clampedY = Math.min(Math.max(y, metaballBaseRadius), heightPixels - metaballBaseRadius);
 
@@ -134,12 +183,12 @@ function createDefaults() {
 }
 
 // --- Movement & rotation ---
-function rotatePoint(metaIndex, cx, cy, speed = 0.05) {
+function rotatePoint(metaIndex, cx, cy, speed = 0.02) {
     const x = metaballPosition[metaIndex][0];
     const y = metaballPosition[metaIndex][1];
     const radius = Math.hypot(x - cx, y - cy);
     let angle = Math.atan2(y - cy, x - cx);
-    angle += speed;
+    angle += speed * deltaTime * 60;
     metaballPosition[metaIndex][0] = cx + radius * Math.cos(angle);
     metaballPosition[metaIndex][1] = cy + radius * Math.sin(angle);
 }
@@ -150,15 +199,35 @@ function generateFrame() {
     deltaTime = (now - lastTime) / 1000;
     lastTime = now;
 
-    // Handle pending resize smoothly
+    // Handle pending resize smoothly (Centered Scaling)
     if (pendingResize) {
         const oldW = widthPixels, oldH = heightPixels;
         const newW = pendingResize.width, newH = pendingResize.height;
-        const scaleX = newW / oldW, scaleY = newH / oldH;
+
+        const oldCx = oldW / 2;
+        const oldCy = oldH / 2;
+        const newCx = newW / 2;
+        const newCy = newH / 2;
+
+        const scaleX = newW / oldW;
+        const scaleY = newH / oldH;
+        const scaleFactor = Math.min(scaleX, scaleY);
 
         for (let i = 0; i < metaballPosition.length; i++) {
-            metaballPosition[i][0] *= scaleX;
-            metaballPosition[i][1] *= scaleY;
+            // 1. Calculate relative position
+            const x = metaballPosition[i][0] - oldCx;
+            const y = metaballPosition[i][1] - oldCy;
+
+            // 2. Apply INVERSE scaling to the relative position to maintain pixel distance from center
+            const scaledX = x / scaleX;
+            const scaledY = y / scaleY;
+
+            // 3. Translate back to the new center
+            metaballPosition[i][0] = scaledX + newCx;
+            metaballPosition[i][1] = scaledY + newCy;
+
+            // 4. Scale Radius
+            metaballRadius[i] *= scaleFactor;
         }
 
         widthPixels = Math.ceil(newW);
@@ -180,7 +249,8 @@ function generateFrame() {
                 const dx = mouseX - metaballPosition[i][0];
                 const dy = mouseY - metaballPosition[i][1];
                 const dist = Math.hypot(dx, dy);
-                if (dist < metaballRadius[i] * 0.6) {
+                // Reduced collision threshold for accurate grab near center
+                if (dist < metaballRadius[i] * 0.1) {
                     metaballSelected[i] = true;
                     mouseOffset.x = dx;
                     mouseOffset.y = dy;
@@ -192,14 +262,15 @@ function generateFrame() {
 
     // Rotate metaballs
     const cx = widthPixels / 2, cy = heightPixels / 2;
-    rotatePoint(0, cx, cy, 0.05);
-    rotatePoint(1, cx, cy, -0.05);
+    rotatePoint(0, cx, cy, 0.01);
+    rotatePoint(1, cx, cy, -0.01);
     rotatePoint(2, cx, cy, -0.02);
 
-    // Clear buffer
-    pixelBuffer.fill(0);
+    // Update the Spatial Grid for efficient rendering
+    updateGrid();
 
-    // console.log(widthPixels, heightPixels, horizontalCells, verticalCells)
+    // Clear pixel buffer
+    pixelBuffer.fill(0);
 
     const renderW = Math.floor(widthPixels * resolutionScale);
     const renderH = Math.floor(heightPixels * resolutionScale);
@@ -213,10 +284,15 @@ function generateFrame() {
 
             let r = 0, g = 0, b = 0, totalWeight = 0, totalForce = 0;
 
-            for (let i = 0; i < metaballPosition.length; i++) {
+            // Use Grid Lookup to only check nearby metaballs
+            const relevantMetaballIndices = getRelevantMetaballs(worldX, worldY);
+
+            for (const i of relevantMetaballIndices) {
                 const dx = worldX - metaballPosition[i][0];
                 const dy = worldY - metaballPosition[i][1];
                 const distSq = dx * dx + dy * dy;
+
+                // Removed hard cutoff check; force calculation allows for smooth falloff
                 const force = metaStrength / (distSq + 1);
                 totalForce += force;
                 const weight = Math.sqrt(distSq);
@@ -227,12 +303,16 @@ function generateFrame() {
             }
 
             if (totalWeight > 0) {
+                // Color blending based on distance
                 r = Math.min(255, r / totalWeight);
                 g = Math.min(255, g / totalWeight);
                 b = Math.min(255, b / totalWeight);
 
                 let hsv = rgbToHsv(r, g, b);
-                hsv[2] = Math.min(1.0, (totalForce * totalForce) / 1000);
+
+                // Adjust brightness based on total force (lower threshold for brighter edges)
+                hsv[2] = Math.min(1.0, (totalForce * totalForce) / 500);
+
                 hsv[1] = Math.max(0, Math.min(1, hsv[1] - 0.2));
                 [r, g, b] = hsvToRgb(hsv[0], hsv[1], hsv[2]);
             }
@@ -249,7 +329,7 @@ function generateFrame() {
     ctx.drawImage(canvas, 0, 0, renderW, renderH, 0, 0, widthPixels, heightPixels);
 }
 
-// --- Loop control ---
+// --- Loop control and messages ---
 function loop() {
     if (!running) return;
     generateFrame();
@@ -267,7 +347,6 @@ function stopLoop() {
     running = false;
 }
 
-// --- Message handling ---
 onmessage = function (e) {
     const data = e.data;
     if (!data) return;
@@ -277,7 +356,6 @@ onmessage = function (e) {
         ctx = canvas.getContext("2d");
         widthPixels = Math.ceil(data.width);
         heightPixels = Math.ceil(data.height);
-        gridSize = data.gridSize || 1;
         metaStrength = data.metaStrength || 50000;
 
         canvas.width = widthPixels;
