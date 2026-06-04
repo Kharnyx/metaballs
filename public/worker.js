@@ -1,16 +1,19 @@
 // worker.js
 
-// --- OffscreenCanvas & rendering ---
 let canvas = null;
-let ctx = null;
+let gl = null;
+let shaderProgram = null;
+let positionBuffer = null;
 
 let widthPixels = 0;
 let heightPixels = 0;
-let metaballBaseRadius = 300;
-let gridSize = metaballBaseRadius * 2; // Grid cell size set to 2x base radius for safe influence culling
-let horizontalCells = 0;
-let verticalCells = 0;
-let metaStrength = 50000;
+let metaballBaseRadius = 200;
+
+// Custom engine modifier targets
+let sharpness = 20;
+let speedMultiplier = 1.0;
+let colorTheme = "rgb";
+let customColor = "#ffffff";
 
 let lastTime = performance.now();
 let deltaTime = 16 / 1000;
@@ -19,317 +22,313 @@ let mouseX = 0, mouseY = 0, mouseDown = false;
 let running = false;
 let pendingResize = null;
 
-let resolutionScale = 1;
-
-// --- Metaball data & Spatial Grid ---
-let metaballPosition = [];
-let metaballRadius = [];
-let metaballColours = [];
-let metaballSelected = [];
+// --- Metaball data ---
+const NUM_METABALLS = 3;
+let metaballPosition = new Float32Array(NUM_METABALLS * 2);
+let metaballRadius = new Float32Array(NUM_METABALLS);
+let metaballVx = new Float32Array(NUM_METABALLS);
+let metaballVy = new Float32Array(NUM_METABALLS);
+let metaballColours = new Float32Array(NUM_METABALLS * 3);
+let metaballSelected = [false, false, false];
 let mouseOffset = { x: 0, y: 0 };
-let metaballGrid = [];
 
-// --- Buffers ---
-let imageData = null;
-let pixelBuffer = null;
+let socialClock = 0;
 
-function ensureBuffers(w, h) {
-    widthPixels = w;
-    heightPixels = h;
+// --- CONFIGURATION ---
+const MIN_RADIUS_MULTIPLIER = 0.2;
+const MAX_RADIUS_MULTIPLIER = 3.5;
+const GROWTH_EXPONENT = 2.5;
+const MERGE_INTERVAL = 800;
 
-    const renderW = Math.floor(widthPixels * resolutionScale);
-    const renderH = Math.floor(heightPixels * resolutionScale);
+// --- WEBGL SHADERS ---
 
-    // Update Grid dimensions based on the rendering size and cell size
-    horizontalCells = Math.ceil(renderW / gridSize);
-    verticalCells = Math.ceil(renderH / gridSize);
+const vertexShaderSource = `
+    attribute vec2 a_position;
+    void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
+    }
+`;
 
-    imageData = ctx.createImageData(renderW, renderH);
-    pixelBuffer = imageData.data;
+// The GPU takes over the pixel math here
+const fragmentShaderSource = `
+    precision mediump float;
+    uniform vec2 u_resolution;
+    uniform vec2 u_positions[${NUM_METABALLS}];
+    uniform float u_radii[${NUM_METABALLS}];
+    uniform vec3 u_colors[${NUM_METABALLS}];
+    uniform float u_sharpness;
 
-    // Initialize the Spatial Grid
-    metaballGrid = Array(horizontalCells * verticalCells).fill(0).map(() => []);
-}
-
-// --- Spatial Grid Functions ---
-
-function updateGrid() {
-    // Clear the grid before repopulating
-    for (let i = 0; i < metaballGrid.length; i++) {
-        metaballGrid[i].length = 0;
+    // Convert HSV to RGB
+    vec3 hsv2rgb(vec3 c) {
+        vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+        vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+        return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
     }
 
-    // Populate the grid with metaball indices
-    for (let i = 0; i < metaballPosition.length; i++) {
-        const radius = metaballRadius[i];
-        const x = metaballPosition[i][0];
-        const y = metaballPosition[i][1];
+    // Convert RGB to HSV
+    vec3 rgb2hsv(vec3 c) {
+        vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+        vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+        vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+        float d = q.x - min(q.w, q.y);
+        float e = 1.0e-10;
+        return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+    }
 
-        // Define the influence area for grid cell overlap calculation
-        const influenceMargin = radius * 2;
-        const minCellX = Math.floor((x - influenceMargin) / gridSize);
-        const maxCellX = Math.ceil((x + influenceMargin) / gridSize);
-        const minCellY = Math.floor((y - influenceMargin) / gridSize);
-        const maxCellY = Math.ceil((y + influenceMargin) / gridSize);
+    void main() {
+        vec2 st = gl_FragCoord.xy;
+        // Flip Y because WebGL 0,0 is bottom-left, but canvas/mouse is top-left
+        st.y = u_resolution.y - st.y;
 
-        // Map the metaball to all cells it overlaps
-        for (let gx = minCellX; gx < maxCellX; gx++) {
-            for (let gy = minCellY; gy < maxCellY; gy++) {
-                if (gx >= 0 && gx < horizontalCells && gy >= 0 && gy < verticalCells) {
-                    const cellIndex = gy * horizontalCells + gx;
-                    // Add index to the cell list
-                    if (!metaballGrid[cellIndex].includes(i)) {
-                        metaballGrid[cellIndex].push(i);
-                    }
-                }
-            }
+        float totalForce = 0.0;
+        float totalWeight = 0.0;
+        vec3 sumColor = vec3(0.0);
+
+        for (int i = 0; i < ${NUM_METABALLS}; i++) {
+            vec2 pos = u_positions[i];
+            float distSq = dot(st - pos, st - pos);
+            float weight = sqrt(distSq);
+
+            float force = (u_radii[i] * u_radii[i] * 0.6) / (distSq + 1.0);
+            totalForce += force;
+            totalWeight += weight;
+
+            sumColor += u_colors[i] * weight;
+        }
+
+        if (totalWeight > 0.0) {
+            vec3 avgColor = sumColor / totalWeight;
+            vec3 hsv = rgb2hsv(avgColor);
+
+            // Apply Sharpness Math
+            float baseBrightness = (totalForce * totalForce) / 500.0;
+            hsv.z = min(1.0, pow(baseBrightness, u_sharpness / 15.0));
+            hsv.y = max(0.0, min(1.0, hsv.y - 0.2));
+
+            gl_FragColor = vec4(hsv2rgb(hsv), 1.0);
+        } else {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
         }
     }
+`;
+
+// --- WEBGL SETUP HELPERS ---
+
+function compileShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error('Shader compile failed:', gl.getShaderInfoLog(shader));
+        gl.deleteShader(shader);
+        return null;
+    }
+    return shader;
 }
 
-function getRelevantMetaballs(x, y) {
-    // Get the grid cell index for the given world coordinate (x, y)
-    const gx = Math.floor(x / gridSize);
-    const gy = Math.floor(y / gridSize);
+function initWebGL() {
+    const vertShader = compileShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+    const fragShader = compileShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
 
-    if (gx < 0 || gx >= horizontalCells || gy < 0 || gy >= verticalCells) {
-        return [];
+    shaderProgram = gl.createProgram();
+    gl.attachShader(shaderProgram, vertShader);
+    gl.attachShader(shaderProgram, fragShader);
+    gl.linkProgram(shaderProgram);
+
+    if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+        console.error('Program link failed:', gl.getProgramInfoLog(shaderProgram));
+        return;
     }
 
-    const cellIndex = gy * horizontalCells + gx;
-    return metaballGrid[cellIndex];
+    // Create a full-screen quad (two triangles)
+    const vertices = new Float32Array([
+        -1.0, -1.0, 1.0, -1.0, -1.0, 1.0,
+        -1.0, 1.0, 1.0, -1.0, 1.0, 1.0
+    ]);
+
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
 }
 
-// --- Color helpers (unchanged) ---
-function hsvToRgb(h, s, v) {
-    let r, g, b;
-    const i = Math.floor(h * 6);
-    const f = h * 6 - i;
-    const p = v * (1 - s);
-    const q = v * (1 - f * s);
-    const t = v * (1 - (1 - f) * s);
-    switch (i % 6) {
-        case 0: r = v; g = t; b = p; break;
-        case 1: r = q; g = v; b = p; break;
-        case 2: r = p; g = v; b = t; break;
-        case 3: r = p; g = q; b = v; break;
-        case 4: r = t; g = p; b = v; break;
-        case 5: r = v; g = p; b = q; break;
+// --- LOGIC HELPERS ---
+
+function hexToRgbFloat(hex) {
+    let bigint = parseInt(hex.substring(1), 16);
+    return [((bigint >> 16) & 255) / 255, ((bigint >> 8) & 255) / 255, (bigint & 255) / 255];
+}
+
+function updateThemeColors() {
+    const themes = {
+        rgb: [[0, 1, 1], [1, 0, 1], [1, 1, 0]],
+        cmy: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        white: [hexToRgbFloat(customColor), hexToRgbFloat(customColor), hexToRgbFloat(customColor)]
+    };
+    const colours = themes[colorTheme] || themes.rgb;
+    for (let i = 0; i < NUM_METABALLS; i++) {
+        metaballColours[i * 3] = colours[i][0];
+        metaballColours[i * 3 + 1] = colours[i][1];
+        metaballColours[i * 3 + 2] = colours[i][2];
     }
-    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
-}
-
-function rgbToHsv(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    const d = max - min;
-    const v = max;
-    const s = max === 0 ? 0 : d / max;
-    let h = 0;
-    if (d !== 0) {
-        switch (max) {
-            case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-            case g: h = (b - r) / d + 2; break;
-            case b: h = (r - g) / d + 4; break;
-        }
-        h /= 6;
-    }
-    return [h, s, v];
-}
-
-// --- Metaballs ---
-function createMetaball(x, y, r, c) {
-    const h_norm = c[0] / 360;
-    const s_norm = c[1] / 100;
-    const v_norm = c[2] / 100;
-    const alpha = Math.round(c[3] * 255);
-    const [cr, cg, cb] = hsvToRgb(h_norm, s_norm, v_norm);
-    metaballPosition.push([x, y]);
-    metaballRadius.push(r);
-    metaballSelected.push(false);
-    metaballColours.push(cr, cg, cb, alpha);
 }
 
 function createDefaults() {
-    metaballPosition = [];
-    metaballRadius = [];
-    metaballColours = [];
-    metaballSelected = [];
-    mouseOffset = { x: 0, y: 0 };
-
-    const colours = [
-        [0, 100, 100, 1],
-        [120, 100, 100, 1],
-        [240, 100, 100, 1]
-    ];
-
-    const n = colours.length;
     const cx = widthPixels / 2;
     const cy = heightPixels / 2;
+    const circleRadius = Math.max(0, (Math.min(widthPixels, heightPixels) / 2) - 100);
 
-    const maxAllowedRadius = Math.min(widthPixels, heightPixels) / 2 - metaballBaseRadius;
-    const circleRadius = Math.max(0, maxAllowedRadius * 0.8);
+    for (let i = 0; i < NUM_METABALLS; i++) {
+        const angle = (2 * Math.PI * i) / NUM_METABALLS;
+        metaballPosition[i * 2] = cx + circleRadius * Math.cos(angle);
+        metaballPosition[i * 2 + 1] = cy + circleRadius * Math.sin(angle);
 
-    for (let i = 0; i < n; i++) {
-        const angle = (2 * Math.PI * i) / n;
-        const x = cx + circleRadius * Math.cos(angle);
-        const y = cy + circleRadius * Math.sin(angle);
-
-        const clampedX = Math.min(Math.max(x, metaballBaseRadius), widthPixels - metaballBaseRadius);
-        const clampedY = Math.min(Math.max(y, metaballBaseRadius), heightPixels - metaballBaseRadius);
-
-        createMetaball(clampedX, clampedY, metaballBaseRadius, colours[i]);
+        metaballRadius[i] = metaballBaseRadius;
+        metaballVx[i] = (Math.random() - 0.5) * 2;
+        metaballVy[i] = (Math.random() - 0.5) * 2;
+        metaballSelected[i] = false;
     }
+    updateThemeColors();
 }
 
-// --- Movement & rotation ---
-function rotatePoint(metaIndex, cx, cy, speed = 0.02) {
-    const x = metaballPosition[metaIndex][0];
-    const y = metaballPosition[metaIndex][1];
-    const radius = Math.hypot(x - cx, y - cy);
-    let angle = Math.atan2(y - cy, x - cx);
-    angle += speed * deltaTime * 60;
-    metaballPosition[metaIndex][0] = cx + radius * Math.cos(angle);
-    metaballPosition[metaIndex][1] = cy + radius * Math.sin(angle);
-}
+// --- MAIN LOOP ---
 
-// --- Frame generation ---
 function generateFrame() {
     const now = performance.now();
     deltaTime = (now - lastTime) / 1000;
     lastTime = now;
 
-    // Handle pending resize smoothly (Centered Scaling)
     if (pendingResize) {
         const oldW = widthPixels, oldH = heightPixels;
-        const newW = pendingResize.width, newH = pendingResize.height;
+        widthPixels = Math.ceil(pendingResize.width);
+        heightPixels = Math.ceil(pendingResize.height);
 
-        const oldCx = oldW / 2;
-        const oldCy = oldH / 2;
-        const newCx = newW / 2;
-        const newCy = newH / 2;
-
-        const scaleX = newW / oldW;
-        const scaleY = newH / oldH;
-        const scaleFactor = Math.min(scaleX, scaleY);
-
-        for (let i = 0; i < metaballPosition.length; i++) {
-            // 1. Calculate relative position
-            const x = metaballPosition[i][0] - oldCx;
-            const y = metaballPosition[i][1] - oldCy;
-
-            // 2. Apply INVERSE scaling to the relative position to maintain pixel distance from center
-            const scaledX = x / scaleX;
-            const scaledY = y / scaleY;
-
-            // 3. Translate back to the new center
-            metaballPosition[i][0] = scaledX + newCx;
-            metaballPosition[i][1] = scaledY + newCy;
-
-            // 4. Scale Radius
-            metaballRadius[i] *= scaleFactor;
+        for (let i = 0; i < NUM_METABALLS; i++) {
+            metaballPosition[i * 2] = (metaballPosition[i * 2] / oldW) * widthPixels;
+            metaballPosition[i * 2 + 1] = (metaballPosition[i * 2 + 1] / oldH) * heightPixels;
         }
 
-        widthPixels = Math.ceil(newW);
-        heightPixels = Math.ceil(newH);
         canvas.width = widthPixels;
         canvas.height = heightPixels;
-        ensureBuffers(widthPixels, heightPixels);
+        gl.viewport(0, 0, widthPixels, heightPixels);
         pendingResize = null;
     }
 
-    // Update dragging
+    // A. Mouse Interaction
     if (mouseDown) {
         const idx = metaballSelected.indexOf(true);
         if (idx !== -1) {
-            metaballPosition[idx][0] = mouseX - mouseOffset.x;
-            metaballPosition[idx][1] = mouseY - mouseOffset.y;
+            metaballPosition[idx * 2] = mouseX - mouseOffset.x;
+            metaballPosition[idx * 2 + 1] = mouseY - mouseOffset.y;
+            metaballVx[idx] = 0;
+            metaballVy[idx] = 0;
         } else {
-            for (let i = 0; i < metaballPosition.length; i++) {
-                const dx = mouseX - metaballPosition[i][0];
-                const dy = mouseY - metaballPosition[i][1];
-                const dist = Math.hypot(dx, dy);
-                // Reduced collision threshold for accurate grab near center
-                if (dist < metaballRadius[i] * 0.1) {
+            for (let i = 0; i < NUM_METABALLS; i++) {
+                const dx = mouseX - metaballPosition[i * 2];
+                const dy = mouseY - metaballPosition[i * 2 + 1];
+                if (Math.hypot(dx, dy) < metaballBaseRadius * 0.8) {
                     metaballSelected[i] = true;
-                    mouseOffset.x = dx;
-                    mouseOffset.y = dy;
+                    mouseOffset = { x: dx, y: dy };
                     break;
                 }
             }
         }
     } else metaballSelected.fill(false);
 
-    // Rotate metaballs
-    const cx = widthPixels / 2, cy = heightPixels / 2;
-    rotatePoint(0, cx, cy, 0.01);
-    rotatePoint(1, cx, cy, -0.01);
-    rotatePoint(2, cx, cy, -0.02);
+    // B. PHYSICS & PROXIMITY ENGINE (Executed in JS)
+    socialClock = (socialClock + 1) % MERGE_INTERVAL;
+    const mergeDuration = 250;
+    const mergeStart = MERGE_INTERVAL - mergeDuration;
+    let attractionMagnitude = 0;
 
-    // Update the Spatial Grid for efficient rendering
-    updateGrid();
-
-    // Clear pixel buffer
-    pixelBuffer.fill(0);
-
-    const renderW = Math.floor(widthPixels * resolutionScale);
-    const renderH = Math.floor(heightPixels * resolutionScale);
-
-    // Render every pixel
-    for (let y = 0; y < renderH; y++) {
-        for (let x = 0; x < renderW; x++) {
-            const worldX = x / resolutionScale;
-            const worldY = y / resolutionScale;
-            const index = (y * renderW + x) * 4;
-
-            let r = 0, g = 0, b = 0, totalWeight = 0, totalForce = 0;
-
-            // Use Grid Lookup to only check nearby metaballs
-            const relevantMetaballIndices = getRelevantMetaballs(worldX, worldY);
-
-            for (const i of relevantMetaballIndices) {
-                const dx = worldX - metaballPosition[i][0];
-                const dy = worldY - metaballPosition[i][1];
-                const distSq = dx * dx + dy * dy;
-
-                // Removed hard cutoff check; force calculation allows for smooth falloff
-                const force = metaStrength / (distSq + 1);
-                totalForce += force;
-                const weight = Math.sqrt(distSq);
-                totalWeight += weight;
-                r += metaballColours[i * 4] * weight;
-                g += metaballColours[i * 4 + 1] * weight;
-                b += metaballColours[i * 4 + 2] * weight;
-            }
-
-            if (totalWeight > 0) {
-                // Color blending based on distance
-                r = Math.min(255, r / totalWeight);
-                g = Math.min(255, g / totalWeight);
-                b = Math.min(255, b / totalWeight);
-
-                let hsv = rgbToHsv(r, g, b);
-
-                // Adjust brightness based on total force (lower threshold for brighter edges)
-                hsv[2] = Math.min(1.0, (totalForce * totalForce) / 500);
-
-                hsv[1] = Math.max(0, Math.min(1, hsv[1] - 0.2));
-                [r, g, b] = hsvToRgb(hsv[0], hsv[1], hsv[2]);
-            }
-
-            pixelBuffer[index] = r;
-            pixelBuffer[index + 1] = g;
-            pixelBuffer[index + 2] = b;
-            pixelBuffer[index + 3] = 255;
-        }
+    if (socialClock > mergeStart) {
+        const progress = socialClock - mergeStart;
+        if (progress < 60) attractionMagnitude = (progress / 60) * 0.07;
+        else if (progress < mergeDuration - 60) attractionMagnitude = 0.07;
+        else attractionMagnitude = (1.0 - (progress - (mergeDuration - 60)) / 60) * 0.07;
     }
 
-    ctx.putImageData(imageData, 0, 0);
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(canvas, 0, 0, renderW, renderH, 0, 0, widthPixels, heightPixels);
+    for (let i = 0; i < NUM_METABALLS; i++) {
+        let totalProximity = 0;
+        const ix = metaballPosition[i * 2];
+        const iy = metaballPosition[i * 2 + 1];
+
+        for (let j = 0; j < NUM_METABALLS; j++) {
+            if (i === j) continue;
+            const distSq = Math.pow(ix - metaballPosition[j * 2], 2) + Math.pow(iy - metaballPosition[j * 2 + 1], 2);
+            totalProximity += 10000 / (distSq + 100);
+        }
+
+        let targetRadius = metaballBaseRadius * (MIN_RADIUS_MULTIPLIER +
+            (Math.pow(totalProximity, GROWTH_EXPONENT) * (MAX_RADIUS_MULTIPLIER - MIN_RADIUS_MULTIPLIER)));
+        targetRadius = Math.min(targetRadius, metaballBaseRadius * MAX_RADIUS_MULTIPLIER);
+        metaballRadius[i] += (targetRadius - metaballRadius[i]) * 0.15;
+
+        if (metaballSelected[i]) continue;
+
+        let ax = 0, ay = 0;
+        for (let j = 0; j < NUM_METABALLS; j++) {
+            if (i === j) continue;
+            const dx = metaballPosition[j * 2] - ix;
+            const dy = metaballPosition[j * 2 + 1] - iy;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist > 0 && dist < 1000) {
+                if (attractionMagnitude > 0) {
+                    ax += (dx / dist) * attractionMagnitude;
+                    ay += (dy / dist) * attractionMagnitude;
+                }
+                if (dist < 180) {
+                    const proxFact = 1.0 - (dist / 180);
+                    const rep = proxFact * proxFact * 0.25;
+                    ax -= (dx / dist) * rep;
+                    ay -= (dy / dist) * rep;
+                }
+            }
+        }
+
+        metaballVx[i] += ax;
+        metaballVy[i] += ay;
+
+        let currentSpeed = Math.sqrt(metaballVx[i] ** 2 + metaballVy[i] ** 2);
+        let targetSpeed = 1.5 * speedMultiplier;
+
+        if (currentSpeed > 0) {
+            let smoothedSpeed = currentSpeed * 0.93 + targetSpeed * 0.07;
+            metaballVx[i] = (metaballVx[i] / currentSpeed) * smoothedSpeed;
+            metaballVy[i] = (metaballVy[i] / currentSpeed) * smoothedSpeed;
+        }
+
+        metaballPosition[i * 2] += metaballVx[i];
+        metaballPosition[i * 2 + 1] += metaballVy[i];
+
+        const pad = 5;
+        if (metaballPosition[i * 2] < pad) { metaballPosition[i * 2] = pad; metaballVx[i] = Math.abs(metaballVx[i]); }
+        else if (metaballPosition[i * 2] > widthPixels - pad) { metaballPosition[i * 2] = widthPixels - pad; metaballVx[i] = -Math.abs(metaballVx[i]); }
+
+        if (metaballPosition[i * 2 + 1] < pad) { metaballPosition[i * 2 + 1] = pad; metaballVy[i] = Math.abs(metaballVy[i]); }
+        else if (metaballPosition[i * 2 + 1] > heightPixels - pad) { metaballPosition[i * 2 + 1] = heightPixels - pad; metaballVy[i] = -Math.abs(metaballVy[i]); }
+    }
+
+    // C. RENDER PIPELINE (Executed on GPU)
+    gl.useProgram(shaderProgram);
+
+    // Bind vertices
+    const posLoc = gl.getAttribLocation(shaderProgram, "a_position");
+    gl.enableVertexAttribArray(posLoc);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    // Push Uniforms (State to GPU)
+    gl.uniform2f(gl.getUniformLocation(shaderProgram, "u_resolution"), widthPixels, heightPixels);
+    gl.uniform1f(gl.getUniformLocation(shaderProgram, "u_sharpness"), sharpness);
+    gl.uniform2fv(gl.getUniformLocation(shaderProgram, "u_positions"), metaballPosition);
+    gl.uniform1fv(gl.getUniformLocation(shaderProgram, "u_radii"), metaballRadius);
+    gl.uniform3fv(gl.getUniformLocation(shaderProgram, "u_colors"), metaballColours);
+
+    // Draw
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
-// --- Loop control and messages ---
 function loop() {
     if (!running) return;
     generateFrame();
@@ -343,9 +342,7 @@ function startLoop() {
     requestAnimationFrame(loop);
 }
 
-function stopLoop() {
-    running = false;
-}
+// --- WORKER MESSAGING ---
 
 onmessage = function (e) {
     const data = e.data;
@@ -353,17 +350,37 @@ onmessage = function (e) {
 
     if (data.type === "init") {
         canvas = data.canvas;
-        ctx = canvas.getContext("2d");
+        gl = canvas.getContext("webgl");
+
         widthPixels = Math.ceil(data.width);
         heightPixels = Math.ceil(data.height);
-        metaStrength = data.metaStrength || 50000;
-
         canvas.width = widthPixels;
         canvas.height = heightPixels;
+        gl.viewport(0, 0, widthPixels, heightPixels);
 
-        ensureBuffers(widthPixels, heightPixels);
+        if (data.initialSettings) {
+            sharpness = data.initialSettings.sharpness;
+            speedMultiplier = data.initialSettings.speedMultiplier;
+            colorTheme = data.initialSettings.colorTheme;
+            customColor = data.initialSettings.customColor || "#ffffff";
+            metaballBaseRadius = data.initialSettings.metaballBaseRadius;
+        }
+
+        initWebGL();
         createDefaults();
         startLoop();
+
+    } else if (data.type === "settingsUpdate") {
+        const s = data.settings;
+        sharpness = s.sharpness;
+        speedMultiplier = s.speedMultiplier;
+        metaballBaseRadius = s.metaballBaseRadius;
+
+        if (s.colorTheme !== colorTheme || s.customColor !== customColor) {
+            colorTheme = s.colorTheme;
+            customColor = s.customColor;
+            updateThemeColors();
+        }
 
     } else if (data.type === "mouse") {
         mouseX = data.x;
@@ -372,12 +389,6 @@ onmessage = function (e) {
     } else if (data.type === "resize") {
         pendingResize = { width: data.width, height: data.height };
     } else if (data.type === "stop") {
-        stopLoop();
-    } else if (data.type === "addMetaball") {
-        const { x, y, r, c } = data;
-        createMetaball(x, y, r, c);
-    } else if (data.type === "setResolution") {
-        resolutionScale = data.scale;
-        ensureBuffers(widthPixels, heightPixels);
+        running = false;
     }
 };
