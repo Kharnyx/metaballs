@@ -4,7 +4,7 @@
     margin: 0;
     padding: 0;
     box-sizing: border-box;
-    font-family: Arial, sans-serif;
+    font-family: 'Segoe UI', Arial, sans-serif;
 }
 
 body {
@@ -12,9 +12,157 @@ body {
     height: 100dvh;
     overflow: hidden;
     user-select: none;
+    background-color: #050508;
 }
 
 canvas {
     width: 100%;
     height: 100%;
+    display: block;
+}
+
+.toggle-settings-btn {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #fff;
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    z-index: 20;
+    transition: background 0.2s, transform 0.2s;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+}
+
+.toggle-settings-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    transform: translateY(-1px);
+}
+
+.controls-panel {
+    position: absolute;
+    top: 80px;
+    left: 20px;
+    width: 310px;
+    max-height: calc(100vh - 80px - 50px);
+    overflow-y: scroll;
+    scrollbar-width: thin;
+    scrollbar-color: #e3e3e3 transparent;
+    background: rgba(15, 15, 25, 0.75);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    padding: 24px;
+    color: #f3f3f6;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    z-index: 10;
+    opacity: 1;
+    transform: translateX(0);
+    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+    pointer-events: auto;
+}
+
+.controls-panel.hidden {
+    opacity: 0;
+    transform: translateX(-350px);
+    pointer-events: none;
+}
+
+.controls-panel h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 20px;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding-bottom: 10px;
+}
+
+.control-group {
+    margin-bottom: 18px;
+}
+
+.control-group label {
+    display: block;
+    font-size: 0.85rem;
+    color: #b5b5c0;
+    margin-bottom: 6px;
+}
+
+.control-group label span {
+    font-weight: bold;
+    color: #00d2ff;
+}
+
+.control-group select,
+.control-group input[type="range"],
+.control-group input[type="color"] {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 8px;
+    outline: none;
+}
+
+.control-group input[type="color"] {
+    padding: 2px 4px;
+    height: 36px;
+    cursor: pointer;
+}
+
+.control-group select option {
+    background: #0f0f19;
+    color: #fff;
+}
+
+.control-group input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+    border: none;
+    padding: 0;
+}
+
+.control-group input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #00d2ff;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+.control-group input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+}
+
+.button-group {
+    margin-top: 24px;
+}
+
+#resetBtn {
+    width: 100%;
+    background: rgba(220, 53, 69, 0.15);
+    border: 1px solid rgba(220, 53, 69, 0.3);
+    color: #ff6b76;
+    padding: 10px;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, border 0.2s;
+}
+
+#resetBtn:hover {
+    background: rgba(220, 53, 69, 0.3);
+    border-color: rgba(220, 53, 69, 0.5);
 }
