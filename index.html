@@ -5,15 +5,52 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Metaballs</title>
-
     <link rel="stylesheet" href="public/style.css">
 </head>
 
 <body>
+    <button id="toggleSettingsBtn" class="toggle-settings-btn">⚙️ Settings</button>
+
+    <div class="controls-panel" id="controlsPanel">
+        <h3>Metaball Settings</h3>
+
+        <div class="control-group">
+            <label for="colorTheme">Color Palette</label>
+            <select id="colorTheme">
+                <option value="rgb">RGB (Red, Green, Blue)</option>
+                <option value="cmy">CMY (Cyan, Magenta, Yellow)</option>
+                <option value="white">Monochrome Glow</option>
+            </select>
+        </div>
+
+        <div class="control-group" id="monoColorGroup" style="display: none;">
+            <label for="monoColorPicker">Glow Color</label>
+            <input type="color" id="monoColorPicker" value="#ffffff">
+        </div>
+
+        <div class="control-group">
+            <label for="baseRadius">Base Radius: <span id="baseRadiusVal">150</span>px</label>
+            <input type="range" id="baseRadius" min="75" max="350" step="5" value="150">
+        </div>
+
+        <div class="control-group">
+            <label for="sharpness">Edge Sharpness: <span id="sharpnessVal">20</span></label>
+            <input type="range" id="sharpness" min="5" max="50" step="1" value="20">
+        </div>
+
+        <div class="control-group">
+            <label for="speed">Movement Speed: <span id="speedVal">1.0</span>x</label>
+            <input type="range" id="speed" min="0" max="3" step="0.1" value="1.0">
+        </div>
+
+        <div class="button-group">
+            <button id="resetBtn">Reset Settings</button>
+        </div>
+    </div>
+
     <canvas id="canvas"></canvas>
 
     <script type="module" src="public/script.js"></script>
 </body>
 
 </html>
-
