@@ -41,7 +41,6 @@ const GROWTH_EXPONENT = 2.5;
 const MERGE_INTERVAL = 800;
 
 // --- WEBGL SHADERS ---
-
 const vertexShaderSource = `
     attribute vec2 a_position;
     void main() {
